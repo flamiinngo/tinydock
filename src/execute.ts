@@ -68,6 +68,16 @@ export const MAX_OUTPUT_CHARS = 64 * 1024;
 /** Headroom so the VM outlives the command and can report its own shutdown stats. */
 const SESSION_GRACE_MS = 10_000;
 
+/**
+ * One vCPU, which carries 2 GB rather than the default 2 vCPU / 4 GB.
+ *
+ * Provisioned memory dominates the cost of a call: Vercel bills a one-minute minimum per
+ * `Sandbox.create()` however briefly the program runs, so halving the memory halves the
+ * floor — $0.00141 to $0.00071 a call. A single untrusted script capped at 5s does not
+ * use a second core, and the cases that would (a parallel build) are not what this sells.
+ */
+const VCPUS = 1;
+
 const RUNTIMES: Record<Language, 'node24' | 'python3.13'> = {
   node: 'node24',
   python: 'python3.13',
@@ -78,8 +88,20 @@ const ENTRYPOINTS: Record<Language, { file: string; cmd: string; args: string[] 
   python: { file: 'main.py', cmd: 'python3', args: ['main.py'] },
 };
 
-export const MAX_PACKAGES = 5;
-export const INSTALL_TIMEOUT_MS = 45_000;
+export const MAX_PACKAGES = 3;
+
+/**
+ * Registry traffic bills at $0.15/GB and nothing in the SDK lets us cap bytes mid-install,
+ * so the install window is the only lever we have. 25s keeps a plausible worst case under
+ * the price of a call, and — with a 5s run and 10s of grace — holds the whole session to
+ * 40s, inside the single one-minute increment Vercel bills provisioned memory in. At 45s
+ * the session touched 60s exactly and risked paying for two.
+ *
+ * This bounds egress by time, not by bytes. A caller on a fast link can still cost more
+ * than they pay. Metering the sandbox's own `totalEgressBytes` needs a blocking stop
+ * (~3.7s per call), which is the wrong trade until abuse is observed.
+ */
+export const INSTALL_TIMEOUT_MS = 25_000;
 
 /**
  * Names only. A leading `-` would be read as a flag, and a `/`, `:` or `@git+` would
@@ -88,7 +110,15 @@ export const INSTALL_TIMEOUT_MS = 45_000;
  */
 const PACKAGE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-/** Least privilege even during install: the registry and its CDN, nothing else. */
+/**
+ * Least privilege even during install: the registry and its CDN, nothing else.
+ *
+ * Neither installer is allowed to execute package-authored code. `npm install` would run
+ * `postinstall`, and `pip` would run `setup.py` to build a source distribution — both while
+ * the registry network is still reachable and before the source under test has even landed.
+ * The VM is a throwaway, so this is not a containment hole, but it is someone else's code
+ * spending our CPU and our egress. `--ignore-scripts` and `--only-binary` say no.
+ */
 const INSTALLERS: Record<
   Language,
   { cmd: string; args: (packages: string[]) => string[]; allow: string[] }
@@ -102,13 +132,24 @@ const INSTALLERS: Record<
       '--no-input',
       '--disable-pip-version-check',
       '--quiet',
+      // Wheels only: an sdist would execute setup.py during install.
+      '--only-binary=:all:',
+      '--no-cache-dir',
       ...packages,
     ],
     allow: ['pypi.org', 'files.pythonhosted.org'],
   },
   node: {
     cmd: 'npm',
-    args: (packages) => ['install', '--no-audit', '--no-fund', '--loglevel=error', ...packages],
+    args: (packages) => [
+      'install',
+      '--no-audit',
+      '--no-fund',
+      '--loglevel=error',
+      '--ignore-scripts',
+      '--omit=dev',
+      ...packages,
+    ],
     allow: ['registry.npmjs.org'],
   },
 };
@@ -178,6 +219,7 @@ export async function execute(req: ExecuteRequest): Promise<ExecuteResult> {
       runtime: RUNTIMES[req.language],
       networkPolicy: packages.length > 0 ? { allow: installer.allow } : 'deny-all',
       timeout: sessionMs,
+      resources: { vcpus: VCPUS },
     });
   } catch (err) {
     throw new ExecuteError('sandbox_failed', `Could not create sandbox: ${String(err)}`);
