@@ -724,8 +724,13 @@
         <button type="button" id="copy">Copy</button>
       </div>
       <p class="alt">
-        Codex, Cursor, OpenClaw and anything else that speaks MCP: point it at
-        <span id="endpoint">/api/mcp</span> over streamable HTTP.
+        Point any MCP client at <span id="endpoint">/api/mcp</span> over streamable HTTP and it
+        will see <code>run_code</code> — but speaking MCP is not enough to call it. The caller
+        must also speak <a href="https://x402.org" rel="noopener">x402</a>: read the challenge,
+        sign it, replay the request. Ninety lines, and no gas token —
+        <a href="https://github.com/flamiinngo/tinydock/blob/main/scripts/pay-402.ts" rel="noopener"
+          >here is a working client</a
+        >.
       </p>
       <p class="note">
         Free plays run in real Firecracker microVMs, including the one that tries to reach the

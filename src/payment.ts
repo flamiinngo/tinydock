@@ -96,14 +96,72 @@ function adapterFor(req: IncomingMessage): HTTPAdapter {
   };
 }
 
+/** What the SDK puts in the PAYMENT-REQUIRED header: base64 JSON, one entry per scheme. */
+interface Challenge {
+  accepts?: Array<{
+    amount?: string;
+    asset?: string;
+    network?: string;
+    payTo?: string;
+    extra?: { name?: string };
+  }>;
+}
+
+/**
+ * An x402 client reads the challenge from the PAYMENT-REQUIRED header and never looks at
+ * the body, so the SDK leaves it empty. But a human wiring this up sees an MCP tool that
+ * fails with a bare `{}` and learns nothing — least of all that a plain MCP client cannot
+ * pay at all. Spend the bytes.
+ */
+function explain(instructions: HTTPResponseInstructions): unknown {
+  const encoded = instructions.headers['PAYMENT-REQUIRED'];
+  if (typeof encoded !== 'string') return instructions.body ?? {};
+
+  let accepted: NonNullable<Challenge['accepts']>[number] | undefined;
+  try {
+    accepted = (JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')) as Challenge)
+      .accepts?.[0];
+  } catch {
+    return instructions.body ?? {};
+  }
+  if (!accepted) return instructions.body ?? {};
+
+  return {
+    error: 'payment_required',
+    message: `One sandboxed execution costs $${PRICE}, paid in ${accepted.extra?.name ?? 'USDT0'} on X Layer.`,
+    price: {
+      usd: PRICE,
+      amount: accepted.amount,
+      asset: accepted.asset,
+      decimals: 6,
+      symbol: accepted.extra?.name,
+    },
+    network: accepted.network,
+    payTo: accepted.payTo,
+    // The single thing a reader most needs to know, and would otherwise learn by guessing.
+    hint:
+      'A plain MCP client cannot pay this. The caller must speak x402: read the challenge ' +
+      'from the PAYMENT-REQUIRED header, sign an EIP-3009 authorization, and replay the ' +
+      'request with a PAYMENT-SIGNATURE header. The signature is a typed message, not a ' +
+      'transaction — you need USDT0 on X Layer and no gas token.',
+    example: 'https://github.com/flamiinngo/tinydock/blob/main/scripts/pay-402.ts',
+    spec: 'https://x402.org',
+  };
+}
+
 function send(res: ServerResponse, instructions: HTTPResponseInstructions): void {
   for (const [name, value] of Object.entries(instructions.headers)) res.setHeader(name, value);
   res.writeHead(instructions.status, {
     'Content-Type': instructions.isHtml ? 'text/html' : 'application/json',
   });
-  res.end(
-    typeof instructions.body === 'string' ? instructions.body : JSON.stringify(instructions.body ?? {}),
-  );
+
+  if (typeof instructions.body === 'string' || instructions.isHtml) {
+    res.end(typeof instructions.body === 'string' ? instructions.body : '');
+    return;
+  }
+
+  const body = instructions.status === 402 ? explain(instructions) : (instructions.body ?? {});
+  res.end(JSON.stringify(body));
 }
 
 /**
