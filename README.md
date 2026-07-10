@@ -23,6 +23,15 @@ SERVER ──▶  200 OK                stdout
 The agent's code runs in a throwaway Firecracker microVM with no network and no DNS,
 and the machine is destroyed when the program exits.
 
+Two tools, both paid the same way:
+
+- **`run_code`** — run a short program, get stdout back. Capped at 5s.
+- **`serve`** — lease a live public HTTPS URL for a few minutes, backed by the same
+  isolated microVM. Inbound traffic works; outbound stays dead, so the leased box can
+  answer visitors and reach nothing. This is the thing an agent cannot do for itself:
+  acquiring a URL means signing up for a host, and signing up means being a legal person
+  with a card. An agent has a wallet, not a passport.
+
 ## It actually settles
 
 Four payments on X Layer mainnet (`eip155:196`), settled through the OKX facilitator:
@@ -108,6 +117,12 @@ and a fleet-wide version would need lease expiry to survive a request that dies 
 registry traffic bills at $0.15/GB. A caller on a fast link can still pull more data than
 their one cent covers. Metering the sandbox's own `totalEgressBytes` requires a blocking
 stop (~3.7s per call), which is the wrong trade until abuse is actually observed.
+
+**`serve` hosts anonymous public pages,** which is a phishing surface. The controls are
+short leases (≤5 min), one live lease per paying wallet, a per-wallet start-rate, and a
+global concurrency ceiling — with every lease bound to an on-chain payment, so abuse has a
+cost and a pseudonymous trail. That raises the bar; it does not make the content safe. A
+commercial deployment wants content scanning and a takedown path on top.
 
 ## Running it
 
