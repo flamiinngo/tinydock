@@ -1,4 +1,5 @@
 import type { Language } from './execute.js';
+import { settlementContext } from './settlement-context.js';
 
 /**
  * Recent activity, for the public cabinet display.
@@ -25,21 +26,35 @@ const events: FeedEvent[] = [];
 let totalExecutions = 0;
 let totalEarnedUsd = 0;
 
-/** Set by the payment gate just before the tool runs; claimed by the execution it paid for. */
-let pendingSettlement: { paidUsd: number; txHash?: string } | undefined;
-
+/**
+ * The money is ours the moment it settles, whether or not the program then runs.
+ * Attribution to a specific feed event goes through the request's own slot.
+ */
 export function recordSettlement(paidUsd: number, txHash?: string): void {
-  pendingSettlement = { paidUsd, txHash };
   totalEarnedUsd += paidUsd;
+
+  const slot = settlementContext.getStore();
+  if (slot) {
+    slot.paidUsd = paidUsd;
+    slot.txHash = txHash;
+  }
 }
 
 export function recordExecution(event: Omit<FeedEvent, 'at' | 'paidUsd' | 'txHash'>): void {
-  const settled = pendingSettlement;
-  pendingSettlement = undefined;
+  const slot = settlementContext.getStore();
+  const settled =
+    slot?.paidUsd === undefined ? {} : { paidUsd: slot.paidUsd, txHash: slot.txHash };
 
   totalExecutions += 1;
   events.unshift({ ...event, at: Date.now(), ...settled });
   if (events.length > MAX_EVENTS) events.length = MAX_EVENTS;
+}
+
+/** Test seam. */
+export function resetFeed(): void {
+  events.length = 0;
+  totalExecutions = 0;
+  totalEarnedUsd = 0;
 }
 
 export function stats(): {

@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { ExecuteError, execute } from './execute.js';
+import { ExecuteError, burnedSandboxTime, execute } from './execute.js';
 import { recordExecution } from './feed.js';
 import { admit, callerIdOf, recordUsage } from './guards.js';
 import { findPreset } from './presets.js';
@@ -37,6 +37,7 @@ export default async function handler(
     return;
   }
 
+  const startedAt = Date.now();
   try {
     const result = await execute({
       language: preset.language,
@@ -65,6 +66,8 @@ export default async function handler(
       runMs: result.runMs,
     });
   } catch (err) {
+    if (burnedSandboxTime(err)) recordUsage('demo', Date.now() - startedAt);
+
     const code = err instanceof ExecuteError ? err.code : 'sandbox_failed';
     json(res, 502, { error: code, message: 'The sandbox could not be created.' });
   } finally {

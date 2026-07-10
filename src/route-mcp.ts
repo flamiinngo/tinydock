@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { type Denied, admit, callerIdOf } from './guards.js';
 import { chargeForCall } from './payment.js';
 import { createServer } from './mcp-app.js';
+import { settlementContext } from './settlement-context.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -64,23 +65,26 @@ export default async function handler(
     release = admission.release;
   }
 
-  try {
-    if (billable && (await chargeForCall(req, res)) === 'responded') return;
+  // One settlement slot per request. Concurrent paid calls must not see each other's.
+  return settlementContext.run({}, async () => {
+    try {
+      if (billable && (await chargeForCall(req, res)) === 'responded') return;
 
-    const server = createServer();
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      enableJsonResponse: true,
-    });
+      const server = createServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+      });
 
-    res.on('close', () => {
-      void transport.close();
-      void server.close();
-    });
+      res.on('close', () => {
+        void transport.close();
+        void server.close();
+      });
 
-    await server.connect(transport);
-    await transport.handleRequest(req, res, body);
-  } finally {
-    release();
-  }
+      await server.connect(transport);
+      await transport.handleRequest(req, res, body);
+    } finally {
+      release();
+    }
+  });
 }

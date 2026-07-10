@@ -5,6 +5,7 @@ import {
   ExecuteError,
   MAX_PACKAGES,
   MAX_TIMEOUT_MS,
+  burnedSandboxTime,
   execute,
 } from './execute.js';
 import { recordExecution } from './feed.js';
@@ -54,6 +55,7 @@ export function createServer(): McpServer {
       },
     },
     async ({ language, source, packages, timeout_ms }) => {
+      const startedAt = Date.now();
       try {
         const result = await execute({ language, source, packages, timeoutMs: timeout_ms });
         recordUsage('paid', result.durationMs);
@@ -83,6 +85,8 @@ export function createServer(): McpServer {
           ],
         };
       } catch (err) {
+        if (burnedSandboxTime(err)) recordUsage('paid', Date.now() - startedAt);
+
         if (err instanceof ExecuteError) {
           return {
             isError: true,

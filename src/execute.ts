@@ -42,6 +42,24 @@ export class ExecuteError extends Error {
   }
 }
 
+/**
+ * Did this failure happen after a microVM booted, and therefore cost us sandbox time?
+ *
+ * The four codes below are all raised before `Sandbox.create()` returns, so they are free.
+ * Anything else — a failed install, a transport error mid-run — means a VM was running and
+ * the budget guard must be told, or a caller who reliably triggers it runs the machine for
+ * nothing. An unrecognised error is assumed to have cost us; undercounting is the worse bug.
+ */
+export function burnedSandboxTime(err: unknown): boolean {
+  if (!(err instanceof ExecuteError)) return true;
+  return !(
+    err.code === 'source_too_large' ||
+    err.code === 'unsupported_language' ||
+    err.code === 'invalid_package' ||
+    err.code === 'sandbox_failed'
+  );
+}
+
 export const MAX_SOURCE_BYTES = 256 * 1024;
 export const MAX_TIMEOUT_MS = 5_000;
 export const DEFAULT_TIMEOUT_MS = 5_000;

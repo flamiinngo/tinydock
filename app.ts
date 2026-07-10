@@ -6,11 +6,15 @@ import play from './src/route-play.js';
 import stats from './src/route-stats.js';
 
 /**
- * One long-lived HTTP server rather than per-route serverless functions.
+ * One HTTP server rather than per-route serverless functions, so the feed and the
+ * abuse guards can share process memory.
  *
- * The feed and the abuse guards keep state in memory; a single process makes that
- * state real — the high-score table accumulates and the budget ceiling is enforced
- * across every request, instead of resetting on each cold function invocation.
+ * That memory is not durable. On Vercel this runs as a Function: instances are reused
+ * but recycled freely, and several may be warm at once. The feed's counters reset when
+ * an instance dies, and `guards.ts` enforces its budget per instance, so a busy fleet
+ * can overshoot a ceiling each instance individually respects. Settled payments are
+ * never lost — those are on chain — but the numbers this process reports about them
+ * are best-effort. A shared counter (Upstash) is the fix.
  */
 
 const port = Number(process.env.PORT ?? 3000);
