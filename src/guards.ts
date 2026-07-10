@@ -32,11 +32,30 @@ const RATE_WINDOW_SECONDS = 60;
 /** Long enough that a month's usage key outlives the month; short enough not to accrete. */
 const USAGE_TTL_SECONDS = 70 * 24 * 60 * 60;
 
-export type Kind = 'paid' | 'demo';
+/** A lease occupies a sandbox slot for minutes, so it gets its own ceiling and its own meter. */
+const MAX_CONCURRENT_LEASES = Number(process.env.TINYDOCK_MAX_LEASES ?? 3);
+
+/** One live site per paying wallet. Two would just be one attacker with more surface. */
+const MAX_LEASES_PER_PAYER = Number(process.env.TINYDOCK_MAX_LEASES_PER_PAYER ?? 1);
+
+/** And a wallet may only start this many leases per window, live or expired. */
+const LEASE_RATE_PER_PAYER = Number(process.env.TINYDOCK_LEASE_RATE ?? 3);
+const LEASE_RATE_WINDOW_SECONDS = 10 * 60;
+
+/** Wall clock, not CPU: a leased server is mostly idle, so this meter is nothing like `paid`. */
+const LEASE_BUDGET_MS = Number(process.env.TINYDOCK_LEASE_BUDGET_MS ?? 4 * 60 * 60 * 1000);
+
+export type Kind = 'paid' | 'demo' | 'lease';
 
 export interface Denied {
   status: number;
-  code: 'budget_exhausted' | 'demo_exhausted' | 'rate_limited' | 'too_busy';
+  code:
+    | 'budget_exhausted'
+    | 'demo_exhausted'
+    | 'rate_limited'
+    | 'too_busy'
+    | 'lease_limit'
+    | 'lease_budget_exhausted';
   message: string;
   retryAfterSeconds?: number;
 }
@@ -45,10 +64,12 @@ export type Admission = { ok: true; release: () => void } | { ok: false; denied:
 
 let inFlight = 0;
 const windows = new Map<string, { count: number; resetAt: number }>();
-let usage = { month: monthKey(), paidMs: 0, demoMs: 0 };
+let usage = { month: monthKey(), paidMs: 0, demoMs: 0, leaseMs: 0 };
 
 function rollMonth(): void {
-  if (usage.month !== monthKey()) usage = { month: monthKey(), paidMs: 0, demoMs: 0 };
+  if (usage.month !== monthKey()) {
+    usage = { month: monthKey(), paidMs: 0, demoMs: 0, leaseMs: 0 };
+  }
 }
 
 export function callerIdOf(req: IncomingMessage): string {
@@ -57,7 +78,8 @@ export function callerIdOf(req: IncomingMessage): string {
   return raw?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
 }
 
-const allowanceFor = (kind: Kind): number => (kind === 'paid' ? PAID_BUDGET_MS : DEMO_BUDGET_MS);
+const allowanceFor = (kind: Kind): number =>
+  kind === 'paid' ? PAID_BUDGET_MS : kind === 'lease' ? LEASE_BUDGET_MS : DEMO_BUDGET_MS;
 
 /** Wall clock, which overstates the active CPU Vercel bills. Conservative on purpose. */
 export async function recordUsage(kind: Kind, durationMs: number): Promise<void> {
@@ -71,6 +93,7 @@ export async function recordUsage(kind: Kind, durationMs: number): Promise<void>
     },
     () => {
       if (kind === 'paid') usage.paidMs += durationMs;
+      else if (kind === 'lease') usage.leaseMs += durationMs;
       else usage.demoMs += durationMs;
     },
   );
@@ -79,7 +102,7 @@ export async function recordUsage(kind: Kind, durationMs: number): Promise<void>
 async function spentMs(kind: Kind): Promise<number> {
   return viaRedis(
     async (client) => Number((await client.get<number>(KEYS.usage(kind, monthKey()))) ?? 0),
-    () => (kind === 'paid' ? usage.paidMs : usage.demoMs),
+    () => (kind === 'paid' ? usage.paidMs : kind === 'lease' ? usage.leaseMs : usage.demoMs),
   );
 }
 
@@ -194,9 +217,136 @@ export async function admit(callerId: string, kind: Kind): Promise<Admission> {
   };
 }
 
+/** leaseId -> expiry, per payer. The in-memory mirror of the Redis sorted sets. */
+const leases = new Map<string, Map<string, number>>();
+
+function pruneMemory(now: number): void {
+  for (const [payer, held] of leases) {
+    for (const [id, expiresAt] of held) if (expiresAt <= now) held.delete(id);
+    if (held.size === 0) leases.delete(payer);
+  }
+}
+
+const countMemoryLeases = (): number =>
+  [...leases.values()].reduce((total, held) => total + held.size, 0);
+
+export type LeaseAdmission =
+  | { ok: true; leaseId: string; release: () => Promise<void> }
+  | { ok: false; denied: Denied };
+
+/**
+ * Decide whether this wallet may lease a public URL — *before* its money is taken.
+ *
+ * The payer is only known once the signature is verified, and settlement happens after
+ * that, so this runs in between. Charging an agent and then refusing to serve it is the
+ * one failure we cannot ship.
+ *
+ * The slot is reserved here rather than after the sandbox boots, so two concurrent
+ * requests cannot both see capacity and both take it. `release()` gives it back if the
+ * sandbox never listens.
+ */
+export async function admitLease(payer: string, leaseSeconds: number): Promise<LeaseAdmission> {
+  const now = Date.now();
+  const expiresAt = now + leaseSeconds * 1000;
+  const leaseId = `${payer}:${now}:${Math.random().toString(36).slice(2, 8)}`;
+
+  const spent = await spentMs('lease');
+  if (spent >= LEASE_BUDGET_MS) {
+    return {
+      ok: false,
+      denied: {
+        status: 503,
+        code: 'lease_budget_exhausted',
+        message: 'Monthly lease budget is exhausted. run_code still works.',
+      },
+    };
+  }
+
+  const tooBusy: Denied = {
+    status: 429,
+    code: 'too_busy',
+    message: `At capacity (${MAX_CONCURRENT_LEASES} concurrent leases).`,
+    retryAfterSeconds: 30,
+  };
+  const perPayer: Denied = {
+    status: 429,
+    code: 'lease_limit',
+    message: `A wallet may hold ${MAX_LEASES_PER_PAYER} live lease and start ${LEASE_RATE_PER_PAYER} per ${LEASE_RATE_WINDOW_SECONDS / 60} minutes.`,
+    retryAfterSeconds: 60,
+  };
+
+  const denied = await viaRedis(
+    async (client) => {
+      const mine = KEYS.payerLeases(payer);
+      await client.zremrangebyscore(KEYS.leases, 0, now);
+      await client.zremrangebyscore(mine, 0, now);
+
+      if ((await client.zcard(KEYS.leases)) >= MAX_CONCURRENT_LEASES) return tooBusy;
+      if ((await client.zcard(mine)) >= MAX_LEASES_PER_PAYER) return perPayer;
+
+      const started = await client.incr(KEYS.leaseRate(payer));
+      if (started === 1) await client.expire(KEYS.leaseRate(payer), LEASE_RATE_WINDOW_SECONDS);
+      if (started > LEASE_RATE_PER_PAYER) {
+        const ttl = await client.ttl(KEYS.leaseRate(payer));
+        return { ...perPayer, retryAfterSeconds: ttl > 0 ? ttl : LEASE_RATE_WINDOW_SECONDS };
+      }
+
+      await client.zadd(KEYS.leases, { score: expiresAt, member: leaseId });
+      await client.zadd(mine, { score: expiresAt, member: leaseId });
+      await client.expire(mine, LEASE_RATE_WINDOW_SECONDS);
+      return undefined;
+    },
+    () => {
+      pruneMemory(now);
+      if (countMemoryLeases() >= MAX_CONCURRENT_LEASES) return tooBusy;
+
+      const held = leases.get(payer) ?? new Map<string, number>();
+      if (held.size >= MAX_LEASES_PER_PAYER) return perPayer;
+
+      held.set(leaseId, expiresAt);
+      leases.set(payer, held);
+      return undefined;
+    },
+  );
+
+  if (denied) return { ok: false, denied };
+
+  return {
+    ok: true,
+    leaseId,
+    release: async () => {
+      await viaRedis(
+        async (client) => {
+          await client.zrem(KEYS.leases, leaseId);
+          await client.zrem(KEYS.payerLeases(payer), leaseId);
+        },
+        () => {
+          leases.get(payer)?.delete(leaseId);
+        },
+      );
+    },
+  };
+}
+
+/** How many public URLs are live right now, across the fleet. */
+export async function liveLeases(): Promise<number> {
+  const now = Date.now();
+  return viaRedis(
+    async (client) => {
+      await client.zremrangebyscore(KEYS.leases, 0, now);
+      return client.zcard(KEYS.leases);
+    },
+    () => {
+      pruneMemory(now);
+      return countMemoryLeases();
+    },
+  );
+}
+
 /** Test seam. Clears the in-memory copy only. */
 export function resetGuards(): void {
   inFlight = 0;
   windows.clear();
-  usage = { month: monthKey(), paidMs: 0, demoMs: 0 };
+  leases.clear();
+  usage = { month: monthKey(), paidMs: 0, demoMs: 0, leaseMs: 0 };
 }

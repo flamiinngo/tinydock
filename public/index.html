@@ -877,7 +877,8 @@
 
           const who = document.createElement("span");
           who.className = "who";
-          who.textContent = `${initials(ev)} · ${ev.language.toUpperCase()}`;
+          const what = ev.kind === "serve" ? "SERVE" : ev.language.toUpperCase();
+          who.textContent = `${initials(ev)} · ${what}`;
 
           const ms = document.createElement("span");
           ms.className = "ms";

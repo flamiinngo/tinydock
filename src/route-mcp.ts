@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { type Denied, admit, callerIdOf } from './guards.js';
+import { DEFAULT_LEASE_SECONDS, MAX_LEASE_SECONDS } from './execute.js';
+import { type Denied, admit, admitLease, callerIdOf } from './guards.js';
 import { chargeForCall } from './payment.js';
 import { createServer } from './mcp-app.js';
 import { settlementContext } from './settlement-context.js';
@@ -28,6 +29,26 @@ function isBillable(body: unknown): boolean {
     typeof m === 'object' && m !== null && (m as { method?: unknown }).method === 'tools/call';
   return Array.isArray(body) ? body.some(isCall) : isCall(body);
 }
+
+interface ToolCall {
+  method?: string;
+  params?: { name?: string; arguments?: { leaseSeconds?: number } };
+}
+
+/** A `serve` call must clear its lease limits before it is charged, so we need its shape early. */
+function serveRequest(body: unknown): { leaseSeconds: number } | undefined {
+  const calls: ToolCall[] = Array.isArray(body) ? body : [body as ToolCall];
+  const serve = calls.find(
+    (m) => m && typeof m === 'object' && m.method === 'tools/call' && m.params?.name === 'serve',
+  );
+  if (!serve) return undefined;
+
+  const requested = serve.params?.arguments?.leaseSeconds;
+  return { leaseSeconds: clampLease(requested ?? DEFAULT_LEASE_SECONDS) };
+}
+
+const clampLease = (seconds: number): number =>
+  Math.round(Math.min(Math.max(seconds, 10), MAX_LEASE_SECONDS));
 
 function sendDenied(res: ServerResponse, denied: Denied): void {
   if (denied.retryAfterSeconds) res.setHeader('Retry-After', String(denied.retryAfterSeconds));
@@ -65,10 +86,37 @@ export default async function handler(
     release = admission.release;
   }
 
+  const serve = serveRequest(body);
+
   // One settlement slot per request. Concurrent paid calls must not see each other's.
   return settlementContext.run({}, async () => {
+    const slot = settlementContext.getStore();
+
+    /**
+     * Reserve the lease once we know the payer and before a cent moves. Charging an agent
+     * and then telling it the lease limit is full would be exactly the failure `admit`
+     * exists to prevent — only this check needs a verified signature to run at all.
+     */
+    const beforeSettle = serve
+      ? async (payer: string) => {
+          const admission = await admitLease(payer, serve.leaseSeconds);
+          if (admission.ok) {
+            if (slot) slot.lease = admission;
+            return undefined;
+          }
+          return {
+            status: admission.denied.status,
+            body: { error: admission.denied.code, message: admission.denied.message },
+          };
+        }
+      : undefined;
+
     try {
-      if (billable && (await chargeForCall(req, res)) === 'responded') return;
+      if (billable && (await chargeForCall(req, res, beforeSettle)) === 'responded') {
+        // Nothing settled, so the reservation must go back.
+        await slot?.lease?.release();
+        return;
+      }
 
       const server = createServer();
       const transport = new StreamableHTTPServerTransport({

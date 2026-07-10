@@ -19,6 +19,8 @@ export interface FeedEvent {
   exitCode: number;
   timedOut: boolean;
   demo: boolean;
+  /** `serve` leased a public URL. The URL itself is never published — see above. */
+  kind?: 'run' | 'serve';
   paidUsd?: number;
   txHash?: string;
 }

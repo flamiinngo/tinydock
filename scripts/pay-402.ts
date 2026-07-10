@@ -50,19 +50,28 @@ const packages = args
   .split(',')
   .filter(Boolean);
 
-const source = packages?.length
-  ? 'import cowsay\ncowsay.cow("paid and executed")'
-  : 'print("paid and executed")';
+/** `--serve` pays for a leased public URL instead of a one-shot run. */
+const wantsServe = args.includes('--serve');
 
-const body = JSON.stringify({
-  jsonrpc: '2.0',
-  id: 1,
-  method: 'tools/call',
-  params: {
-    name: 'run_code',
-    arguments: { language: 'python', source, ...(packages?.length ? { packages } : {}) },
-  },
-});
+const NODE_SERVER =
+  "const http=require('node:http');" +
+  "http.createServer((q,r)=>{r.writeHead(200,{'Content-Type':'text/html'});" +
+  "r.end('<h1>Leased by an agent that has no account</h1>')}).listen(process.env.PORT);";
+
+const source = wantsServe
+  ? NODE_SERVER
+  : packages?.length
+    ? 'import cowsay\ncowsay.cow("paid and executed")'
+    : 'print("paid and executed")';
+
+const params = wantsServe
+  ? { name: 'serve', arguments: { language: 'node', source, leaseSeconds: 60 } }
+  : {
+      name: 'run_code',
+      arguments: { language: 'python', source, ...(packages?.length ? { packages } : {}) },
+    };
+
+const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params });
 
 /** The MCP transport validates Accept before it will answer. It runs *after*
  *  settlement, so getting this wrong means paying for a 406. */

@@ -8,6 +8,7 @@ import type {
 } from '@okxweb3/x402-core/server';
 import { ExactEvmScheme } from '@okxweb3/x402-evm/exact/server';
 import { recordSettlement } from './feed.js';
+import { settlementContext } from './settlement-context.js';
 import {
   MCP_ROUTE,
   MCP_ROUTE_PATTERN,
@@ -174,6 +175,12 @@ function send(res: ServerResponse, instructions: HTTPResponseInstructions): void
 export async function chargeForCall(
   req: IncomingMessage,
   res: ServerResponse,
+  /**
+   * Runs once the payer is known and before a single cent moves. Return a rejection to
+   * refuse the call for free. A lease is limited per wallet, and the wallet is only
+   * knowable from a verified signature — so this is the only place that check can live.
+   */
+  beforeSettle?: (payer: string) => Promise<{ status: number; body: unknown } | undefined>,
 ): Promise<PaymentOutcome> {
   if (!PAYMENT_ENABLED) return 'allowed';
 
@@ -193,6 +200,31 @@ export async function chargeForCall(
     return 'responded';
   }
   if (verified.type === 'no-payment-required') return 'allowed';
+
+  // Record who is paying before we settle. The signature authorizes a transfer from this
+  // address, so it cannot be forged, and a lease is rate-limited against it.
+  const slot = settlementContext.getStore();
+  if (slot) {
+    const { authorization } = (
+      verified.paymentPayload as { payload?: { authorization?: { from?: string } } }
+    ).payload ?? {};
+    if (authorization?.from) slot.payer = authorization.from.toLowerCase();
+  }
+
+  if (beforeSettle) {
+    const payer =
+      slot?.payer ??
+      (
+        verified.paymentPayload as { payload?: { authorization?: { from?: string } } }
+      ).payload?.authorization?.from?.toLowerCase();
+
+    const rejection = payer ? await beforeSettle(payer) : undefined;
+    if (rejection) {
+      res.writeHead(rejection.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(rejection.body));
+      return 'responded';
+    }
+  }
 
   const settled = await gateway.processSettlement(
     verified.paymentPayload,

@@ -72,4 +72,8 @@ export const KEYS = {
   recent: 'td:recent',
   usage: (kind: string, month: string) => `td:usage:${kind}:${month}`,
   rate: (kind: string, callerId: string) => `td:rate:${kind}:${callerId}`,
+  /** Sorted sets scored by lease expiry, so a crashed request cannot leak a slot forever. */
+  leases: 'td:leases',
+  payerLeases: (payer: string) => `td:leases:${payer}`,
+  leaseRate: (payer: string) => `td:leaserate:${payer}`,
 } as const;
