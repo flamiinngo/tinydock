@@ -111,18 +111,45 @@ in either mode, because settlement lives on chain and not in that counter.
 `inFlight` stays per-instance on purpose. It caps how far one process oversubscribes itself,
 and a fleet-wide version would need lease expiry to survive a request that dies mid-run.
 
+## Abuse prevention on `serve`
+
+`serve` hands an anonymous, crypto-paying caller a public URL. Treated carelessly that is a
+phishing host. It is not treated carelessly. The controls below are enforced in code, not
+aspirational, and every one is covered by `scripts/test-leases.ts`.
+
+| Control | Default | Enforced in | Why |
+| --- | --- | --- | --- |
+| Lease is short-lived | 120s, max 300s | `execute.ts` `MAX_LEASE_SECONDS` | Long enough to demo a page, too short to point a campaign at. The microVM's own `timeout` kills it — a crashed request cannot leave a page up. |
+| One live lease per wallet | 1 | `guards.ts` `admitLease` | A second live page from the same payer is refused. One attacker with a funded wallet gets one surface, not a fleet. |
+| Per-wallet start rate | 3 / 10 min | `guards.ts` `admitLease` | Caps churn — spin-up-abuse-teardown-repeat — from a single identity. |
+| Global concurrency ceiling | 3 | `guards.ts` `admitLease` | Bounds total exposure across all payers at once. |
+| No outbound network | always | `execute.ts` `serve` | The leased box answers visitors and reaches **nothing** — no DNS, no fetch. It cannot proxy, exfiltrate, or relay. Verified in `scripts/spike-serve.ts`. |
+| URL never published | always | `feed.ts` | The public feed shows a lease happened, never where. No discoverable index of live agent pages. |
+
+Two properties make this stronger than a typical free host, and both matter to a reviewer:
+
+**The identity is the wallet, and it cannot be forged.** The per-wallet limits key on
+`authorization.from` — the address that *signed the payment*. A caller cannot rotate it like
+an IP without a different funded key, and every lease it ever opened is a transaction on a
+public chain. Abuse carries a cost and a permanent pseudonymous trail.
+
+**The limit is checked before the money moves.** `admitLease` runs after signature
+verification but before settlement, so a refused caller is turned away for free — the system
+never takes payment for a lease it won't grant. Confirmed live: a second lease from the same
+wallet returns `429` with no on-chain transfer.
+
+**What this does not do,** stated plainly: it does not inspect the *content* of a served
+page. A single short-lived page from a rate-limited, on-chain-identified wallet is a poor
+phishing vehicle, but a determined actor within those limits could still serve something
+malicious for a few minutes. A commercial deployment adds content scanning and a takedown
+path on top of these structural controls; they are complementary, not a substitute.
+
 ## Known limitations
 
 **Package-install egress is bounded by time, not bytes.** `INSTALL_TIMEOUT_MS` is 25s and
 registry traffic bills at $0.15/GB. A caller on a fast link can still pull more data than
 their one cent covers. Metering the sandbox's own `totalEgressBytes` requires a blocking
 stop (~3.7s per call), which is the wrong trade until abuse is actually observed.
-
-**`serve` hosts anonymous public pages,** which is a phishing surface. The controls are
-short leases (≤5 min), one live lease per paying wallet, a per-wallet start-rate, and a
-global concurrency ceiling — with every lease bound to an on-chain payment, so abuse has a
-cost and a pseudonymous trail. That raises the bar; it does not make the content safe. A
-commercial deployment wants content scanning and a takedown path on top.
 
 ## Running it
 
