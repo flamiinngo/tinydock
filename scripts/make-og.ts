@@ -187,7 +187,7 @@ paintBackground();
 drawCentred('TINYDOCK', 150, 14, MARQUEE);
 drawCentred('NO ACCOUNT. NO CARD. NO HUMAN.', 300, 5, PHOSPHOR);
 drawCoin(WIDTH / 2, 430, 52);
-drawCentred('0.01 USDT0 PER SANDBOX', 530, 4, DIM);
+drawCentred('RUN OR HOST. 0.01 USDT0', 530, 4, DIM);
 drawScanlines();
 
 const out = fileURLToPath(new URL('../public/og.png', import.meta.url));

@@ -715,9 +715,12 @@
       <p class="eyebrow">For agents &amp; developers</p>
       <h2>Plug an agent in</h2>
       <p>
-        TinyDock is an MCP server. An agent calls <code>run_code</code>, gets HTTP 402, pays one
-        cent from its own wallet, and receives stdout. Nobody signs up for anything. The
-        sandbox has no network — not even DNS — and it is destroyed when the program exits.
+        TinyDock is an MCP server with two tools. <code>run_code</code> runs a program and
+        returns stdout. <code>serve</code> leases a live public URL for a few minutes. Either
+        way the agent gets HTTP 402, pays one cent from its own wallet, and nobody signs up
+        for anything. The sandbox has no outbound network — not even DNS — so leased pages can
+        answer visitors and reach nothing. A URL an agent can buy, because it can't sign up
+        for one.
       </p>
       <div class="cta">
         <code id="install"></code>
@@ -799,6 +802,15 @@
           "",
           "      HTTP 402 SAT UNUSED FOR 25 YEARS.",
           "         IT WAS WAITING FOR THEM.",
+        ],
+        [
+          "  AGENT  ──▶  POST /api/mcp         serve",
+          "  SERVER ──▶  402 PAYMENT REQUIRED  0.01 USD₮0",
+          "  AGENT  ──▶  signs · pays · retries",
+          "  SERVER ──▶  200 OK                a live url",
+          "",
+          "     A URL. FOR AN AGENT THAT CANNOT",
+          "          SIGN UP FOR ONE.",
         ],
         [
           "  EVERY CLOUD ASKS FOR A CREDIT CARD.",
