@@ -57,7 +57,7 @@ export default async function handler(
 
   if (billable) {
     // Admission precedes payment: charging for a call we then refuse to run is unforgivable.
-    const admission = admit(callerIdOf(req), 'paid');
+    const admission = await admit(callerIdOf(req), 'paid');
     if (!admission.ok) {
       sendDenied(res, admission.denied);
       return;

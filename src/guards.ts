@@ -1,12 +1,18 @@
 import type { IncomingMessage } from 'node:http';
+import { KEYS, monthKey, viaRedis } from './store.js';
 
 /**
  * Admission control.
  *
- * State is per-instance and in memory. Vercel Functions are stateless, so under the
- * concurrency that spawns several warm instances each keeps its own counters — meaning
- * the fleet can overshoot a budget that any single instance respects. The guard is
- * weakest under exactly the load it exists to stop. A shared counter (Upstash) fixes it.
+ * The budget ceiling and the per-caller rate limit live in Redis when it is configured,
+ * because both are fleet-wide facts. Held in process memory they were enforced by each
+ * warm instance against its own private tally: the budget overshot under concurrency, and
+ * a caller could evade the rate limit simply by landing on a different instance. Both
+ * guards were weakest under exactly the load they exist to stop.
+ *
+ * `inFlight` stays per-instance on purpose. It caps how much one process oversubscribes
+ * itself, and a fleet-wide version would need lease expiry to survive a request that dies
+ * mid-execution — a distributed lock protecting a local resource.
  */
 
 /** Vercel Hobby pauses sandbox creation past 5 CPU-hours/month, which takes the ASP offline. */
@@ -21,7 +27,10 @@ const DEMO_BUDGET_MS = Number(process.env.TINYDOCK_DEMO_BUDGET_MS ?? 20 * 60 * 1
 const MAX_CONCURRENT = Number(process.env.TINYDOCK_MAX_CONCURRENT ?? 3);
 const PAID_CALLS_PER_MINUTE = Number(process.env.TINYDOCK_RATE_PER_MIN ?? 6);
 const DEMO_CALLS_PER_MINUTE = Number(process.env.TINYDOCK_DEMO_RATE_PER_MIN ?? 1);
-const RATE_WINDOW_MS = 60_000;
+const RATE_WINDOW_SECONDS = 60;
+
+/** Long enough that a month's usage key outlives the month; short enough not to accrete. */
+const USAGE_TTL_SECONDS = 70 * 24 * 60 * 60;
 
 export type Kind = 'paid' | 'demo';
 
@@ -38,10 +47,6 @@ let inFlight = 0;
 const windows = new Map<string, { count: number; resetAt: number }>();
 let usage = { month: monthKey(), paidMs: 0, demoMs: 0 };
 
-function monthKey(): string {
-  return new Date().toISOString().slice(0, 7);
-}
-
 function rollMonth(): void {
   if (usage.month !== monthKey()) usage = { month: monthKey(), paidMs: 0, demoMs: 0 };
 }
@@ -52,59 +57,98 @@ export function callerIdOf(req: IncomingMessage): string {
   return raw?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
 }
 
+const allowanceFor = (kind: Kind): number => (kind === 'paid' ? PAID_BUDGET_MS : DEMO_BUDGET_MS);
+
 /** Wall clock, which overstates the active CPU Vercel bills. Conservative on purpose. */
-export function recordUsage(kind: Kind, durationMs: number): void {
+export async function recordUsage(kind: Kind, durationMs: number): Promise<void> {
   rollMonth();
-  if (kind === 'paid') usage.paidMs += durationMs;
-  else usage.demoMs += durationMs;
+
+  await viaRedis(
+    async (client) => {
+      const key = KEYS.usage(kind, monthKey());
+      await client.incrby(key, Math.round(durationMs));
+      await client.expire(key, USAGE_TTL_SECONDS);
+    },
+    () => {
+      if (kind === 'paid') usage.paidMs += durationMs;
+      else usage.demoMs += durationMs;
+    },
+  );
 }
 
-export function usageSnapshot(): {
+async function spentMs(kind: Kind): Promise<number> {
+  return viaRedis(
+    async (client) => Number((await client.get<number>(KEYS.usage(kind, monthKey()))) ?? 0),
+    () => (kind === 'paid' ? usage.paidMs : usage.demoMs),
+  );
+}
+
+export async function usageSnapshot(): Promise<{
   paidUsedRatio: number;
   demoUsedRatio: number;
   inFlight: number;
   demoExhausted: boolean;
-} {
+}> {
   rollMonth();
+  const [paidMs, demoMs] = await Promise.all([spentMs('paid'), spentMs('demo')]);
+
   return {
-    paidUsedRatio: Math.min(1, usage.paidMs / PAID_BUDGET_MS),
-    demoUsedRatio: Math.min(1, usage.demoMs / DEMO_BUDGET_MS),
+    paidUsedRatio: Math.min(1, paidMs / PAID_BUDGET_MS),
+    demoUsedRatio: Math.min(1, demoMs / DEMO_BUDGET_MS),
     inFlight,
-    demoExhausted: usage.demoMs >= DEMO_BUDGET_MS,
+    demoExhausted: demoMs >= DEMO_BUDGET_MS,
   };
 }
 
-function checkRate(callerId: string, limit: number, now: number): Denied | undefined {
-  for (const [key, window] of windows) if (window.resetAt <= now) windows.delete(key);
+/**
+ * One call against the window. Returns the denial if this call put the caller over.
+ *
+ * Redis counts the call as it checks it, so two concurrent requests cannot both read a
+ * count below the limit and both proceed. The in-memory path keeps its old semantics.
+ */
+async function checkRate(key: string, limit: number): Promise<Denied | undefined> {
+  const over = (retryAfterSeconds: number): Denied => ({
+    status: 429,
+    code: 'rate_limited',
+    message: `Rate limit is ${limit} call${limit === 1 ? '' : 's'} per minute.`,
+    retryAfterSeconds: Math.max(1, retryAfterSeconds),
+  });
 
-  const window = windows.get(callerId);
-  if (!window) {
-    windows.set(callerId, { count: 1, resetAt: now + RATE_WINDOW_MS });
-    return undefined;
-  }
-  if (window.count >= limit) {
-    return {
-      status: 429,
-      code: 'rate_limited',
-      message: `Rate limit is ${limit} call${limit === 1 ? '' : 's'} per minute.`,
-      retryAfterSeconds: Math.max(1, Math.ceil((window.resetAt - now) / 1000)),
-    };
-  }
-  window.count += 1;
-  return undefined;
+  return viaRedis(
+    async (client) => {
+      const count = await client.incr(key);
+      if (count === 1) await client.expire(key, RATE_WINDOW_SECONDS);
+      if (count <= limit) return undefined;
+
+      const ttl = await client.ttl(key);
+      return over(ttl > 0 ? ttl : RATE_WINDOW_SECONDS);
+    },
+    () => {
+      const now = Date.now();
+      for (const [k, window] of windows) if (window.resetAt <= now) windows.delete(k);
+
+      const window = windows.get(key);
+      if (!window) {
+        windows.set(key, { count: 1, resetAt: now + RATE_WINDOW_SECONDS * 1000 });
+        return undefined;
+      }
+      if (window.count >= limit) return over(Math.ceil((window.resetAt - now) / 1000));
+
+      window.count += 1;
+      return undefined;
+    },
+  );
 }
 
 /**
  * Call before taking payment. Charging an agent and then refusing to run its code
  * because the sandbox budget is gone is the one failure we cannot ship.
  */
-export function admit(callerId: string, kind: Kind): Admission {
-  const now = Date.now();
+export async function admit(callerId: string, kind: Kind): Promise<Admission> {
   rollMonth();
 
-  const spent = kind === 'paid' ? usage.paidMs : usage.demoMs;
-  const allowance = kind === 'paid' ? PAID_BUDGET_MS : DEMO_BUDGET_MS;
-  if (spent >= allowance) {
+  const spent = await spentMs(kind);
+  if (spent >= allowanceFor(kind)) {
     return {
       ok: false,
       denied:
@@ -135,7 +179,7 @@ export function admit(callerId: string, kind: Kind): Admission {
   }
 
   const limit = kind === 'paid' ? PAID_CALLS_PER_MINUTE : DEMO_CALLS_PER_MINUTE;
-  const rateDenial = checkRate(`${kind}:${callerId}`, limit, now);
+  const rateDenial = await checkRate(KEYS.rate(kind, callerId), limit);
   if (rateDenial) return { ok: false, denied: rateDenial };
 
   inFlight += 1;
@@ -150,7 +194,7 @@ export function admit(callerId: string, kind: Kind): Admission {
   };
 }
 
-/** Test seam. */
+/** Test seam. Clears the in-memory copy only. */
 export function resetGuards(): void {
   inFlight = 0;
   windows.clear();

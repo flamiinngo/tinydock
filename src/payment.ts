@@ -148,7 +148,7 @@ export async function chargeForCall(
   }
 
   const { transaction } = settled as { transaction?: string };
-  recordSettlement(PRICE, transaction);
+  await recordSettlement(PRICE, transaction);
 
   for (const [name, value] of Object.entries(settled.headers)) res.setHeader(name, value);
   return 'allowed';

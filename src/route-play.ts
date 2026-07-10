@@ -25,7 +25,7 @@ export default async function handler(
     return;
   }
 
-  const admission = admit(callerIdOf(req), 'demo');
+  const admission = await admit(callerIdOf(req), 'demo');
   if (!admission.ok) {
     if (admission.denied.retryAfterSeconds) {
       res.setHeader('Retry-After', String(admission.denied.retryAfterSeconds));
@@ -45,8 +45,8 @@ export default async function handler(
       timeoutMs: DEMO_TIMEOUT_MS,
     });
     // Billed on total wall clock; displayed as the program's own runtime.
-    recordUsage('demo', result.durationMs);
-    recordExecution({
+    await recordUsage('demo', result.durationMs);
+    await recordExecution({
       language: preset.language,
       runMs: result.runMs,
       exitCode: result.exitCode,
@@ -66,7 +66,7 @@ export default async function handler(
       runMs: result.runMs,
     });
   } catch (err) {
-    if (burnedSandboxTime(err)) recordUsage('demo', Date.now() - startedAt);
+    if (burnedSandboxTime(err)) await recordUsage('demo', Date.now() - startedAt);
 
     const code = err instanceof ExecuteError ? err.code : 'sandbox_failed';
     json(res, 502, { error: code, message: 'The sandbox could not be created.' });

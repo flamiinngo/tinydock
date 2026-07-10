@@ -682,11 +682,11 @@
 
       <dl class="scorebar">
         <div class="led">
-          <dt>Credits played</dt>
+          <dt id="led-credits-label">Credits played</dt>
           <dd id="led-credits">0</dd>
         </div>
         <div class="led">
-          <dt>Earned onchain</dt>
+          <dt id="led-earned-label">Earned onchain</dt>
           <dd class="coinlit" id="led-earned">$0.000</dd>
         </div>
         <div class="led">
@@ -932,6 +932,12 @@
           $("led-credits").textContent = data.totalExecutions.toLocaleString();
           $("led-earned").textContent = `$${data.totalEarnedUsd.toFixed(3)}`;
           $("led-inflight").textContent = String(data.inFlight);
+
+          // Without a shared store these counters are one instance's, and reset when it
+          // recycles. Say so rather than let the cabinet overstate the takings.
+          const durable = data.durable !== false;
+          $("led-credits-label").textContent = durable ? "Credits played" : "Credits (this node)";
+          $("led-earned-label").textContent = durable ? "Earned onchain" : "Earned (this node)";
           $("insert").textContent = `Insert ${data.priceUsd} USD₮0`;
           buildPlays(data.presets, data.demoExhausted || data.outOfOrder);
 

@@ -58,8 +58,8 @@ export function createServer(): McpServer {
       const startedAt = Date.now();
       try {
         const result = await execute({ language, source, packages, timeoutMs: timeout_ms });
-        recordUsage('paid', result.durationMs);
-        recordExecution({
+        await recordUsage('paid', result.durationMs);
+        await recordExecution({
           language,
           runMs: result.runMs,
           exitCode: result.exitCode,
@@ -85,7 +85,7 @@ export function createServer(): McpServer {
           ],
         };
       } catch (err) {
-        if (burnedSandboxTime(err)) recordUsage('paid', Date.now() - startedAt);
+        if (burnedSandboxTime(err)) await recordUsage('paid', Date.now() - startedAt);
 
         if (err instanceof ExecuteError) {
           return {
