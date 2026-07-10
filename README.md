@@ -65,33 +65,49 @@ Execution is capped at 5s, source at 256 KB, output at 64 KB, and at most 5 pack
 ## What it costs to run
 
 Not what you'd guess. A call's floor is set by Vercel Sandbox **provisioned memory**, which
-bills a one-minute minimum per `Sandbox.create()` no matter how briefly the program runs:
+bills a one-minute minimum per `Sandbox.create()` no matter how briefly the program runs.
+That is why `execute.ts` asks for one vCPU — each carries 2 GB, and memory, not runtime,
+is the bill:
 
 ```
-4 GB × (1/60) hr × $0.0212/GB-hr  =  $0.001413   per call, before any CPU burns
+2 GB × (1/60) hr × $0.0212/GB-hr  =  $0.000707   per call, before any CPU burns
 ```
 
-A 200 ms `print(1)` and a 5-second loop cost nearly the same. Active CPU adds ~$0.0004 at
-worst. So a bare call costs roughly **$0.0016–0.0018** against $0.01 collected — about six
-times coverage.
+A 200 ms `print(1)` and a 5-second loop cost nearly the same. Active CPU adds ~$0.0002 at
+worst. So a bare call costs roughly **$0.0009** against $0.01 collected — better than ten
+times coverage. At the default 2 vCPU / 4 GB it would be $0.0016.
+
+These are Vercel's published rates applied to our own configuration, not a reconciled
+invoice. Right order of magnitude; not audited.
+
+## State that survives
+
+Vercel Functions are stateless: instances are recycled freely and several run warm at once.
+Anything in process memory is per-instance, so the cabinet's counters drifted and the
+monthly budget was enforced by each instance against its own private tally — the guard was
+weakest under exactly the concurrency it exists to stop, and the rate limit could be evaded
+by landing somewhere else.
+
+`src/store.ts` puts the executions, earnings, recent events, monthly usage and rate-limit
+windows in Redis. Redis counts a rate-limited call *as* it checks it, so two concurrent
+requests cannot both read a count below the limit and both proceed.
+
+It is optional. With no credentials every caller falls back to process memory — that is what
+local development and `scripts/test-*.ts` use, and `/api/stats` reports `durable: false` so
+the page can label its counters "(this node)" rather than present one instance's takings as
+the total. A Redis outage falls back the same way instead of failing the request: a payment
+gate that dies because a cache blinked is not commercial-grade. The money is never at risk
+in either mode, because settlement lives on chain and not in that counter.
+
+`inFlight` stays per-instance on purpose. It caps how far one process oversubscribes itself,
+and a fleet-wide version would need lease expiry to survive a request that dies mid-run.
 
 ## Known limitations
 
-Stated plainly, because they're real.
-
-**The public feed is not durable.** `src/feed.ts` keeps executions in process memory.
-Vercel Functions are stateless, so when an instance recycles the counter resets and past
-settlements vanish from `/api/stats`. Money is never lost — every cent lands in `PAY_TO` on
-chain — but the displayed total under-reports. A shared counter (Upstash) fixes it.
-
-**The budget ceiling has the same hole,** and it matters more. `src/guards.ts` enforces the
-monthly execution budget per instance, so under the concurrency that spawns several warm
-instances, the fleet can overshoot a limit that each instance individually respects. The
-guard is weakest under exactly the load it exists to stop.
-
-**Package-install egress is bounded by time, not bytes.** `INSTALL_TIMEOUT_MS` is 45s and
-registry traffic bills at $0.15/GB. A caller naming five large packages can cost more in
-data transfer than the one cent they paid.
+**Package-install egress is bounded by time, not bytes.** `INSTALL_TIMEOUT_MS` is 25s and
+registry traffic bills at $0.15/GB. A caller on a fast link can still pull more data than
+their one cent covers. Metering the sandbox's own `totalEgressBytes` requires a blocking
+stop (~3.7s per call), which is the wrong trade until abuse is actually observed.
 
 ## Running it
 
@@ -109,6 +125,7 @@ Payment is skipped entirely unless `TINYDOCK_PAY_TO`, `OKX_API_KEY`, `OKX_SECRET
 | `TINYDOCK_PAY_TO` | Wallet that receives settlement |
 | `OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE` | OKX settlement broker credentials |
 | `TINYDOCK_PRICE` | Price per call in USD. Default `0.01` |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Redis, for shared counters. Absent → process memory |
 | `TINYDOCK_TEST_KEY` | Private key for `scripts/pay-402.ts`. Never the `PAY_TO` wallet |
 
 ### Scripts
@@ -119,6 +136,7 @@ Payment is skipped entirely unless `TINYDOCK_PAY_TO`, `OKX_API_KEY`, `OKX_SECRET
 | `scripts/pay-402.ts` | Full paid call against a live deployment. `--yes` to actually spend |
 | `scripts/try.ts` | Run the sandbox directly, bypassing payment |
 | `scripts/test-guards.ts` | Admission control |
+| `scripts/test-feed.ts` | Settlement is attributed to the execution that paid for it |
 | `scripts/test-packages.ts` | Install-then-cut-network path |
 
 ## Stack
