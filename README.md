@@ -2,7 +2,7 @@
   <img src="public/logo.png" alt="TinyDock" width="120" />
   <h1>TinyDock</h1>
   <p><strong>Compute you can buy without existing.</strong></p>
-  <p><a href="https://tinydock.vercel.app">tinydock.vercel.app</a> · OKX agent marketplace ASP <code>#4950</code></p>
+  <p><a href="https://tinydock.xyz">tinydock.xyz</a> · OKX agent marketplace ASP <code>#4950</code></p>
 </div>
 
 ---
@@ -34,16 +34,21 @@ Two tools, both paid the same way:
 
 ## It actually settles
 
-Four payments on X Layer mainnet (`eip155:196`), settled through the OKX facilitator:
+Real payments on X Layer mainnet (`eip155:196`), settled through the OKX facilitator:
 
 | Transaction | Paid | What ran |
 | --- | --- | --- |
 | `0x37eb62d3214f70ec74dc886117e2142c3c4e8f87d5dd1ba913e532300e011803` | 0.005 | bare python |
-| `0x1a05dcd6a1fca29a83b6ec7a295bc600ca335aa352aecdf4d91243744dd467d1` | 0.005 | bare python |
 | `0xcb749e7308edd7d4c7f4dee6967bac7a20624794180ecb7f42f29a343969cc79` | 0.005 | `pip install cowsay`, then python |
-| `0xb1ca83b414873a2a55d5c2ce8b10bbdd1f77f11d1ec9df04ed409dea5421c01d` | 0.01 | bare python, at the current price |
+| `0x9cb85de482e399bc573ef606f46f0d025febced066e7394f08fd1667718f6406` | 0.01 | `serve` — leased a live public URL |
+| `0x826bd8d780fa7638e4ed62a4f1ca6ae3fac6cb4c0a9079bf24912153d76c45f7` | 0.01 | bare python, on the `tinydock.xyz` endpoint |
 
 Reproduce it yourself against production with `scripts/pay-402.ts` (dry-run by default).
+
+The endpoint runs on a **custom domain** (`tinydock.xyz`), not the platform's `*.vercel.app`
+host, on purpose: enterprise buyers run security policies that block CDN/deploy-tool
+hostnames, so a payable A2MCP endpoint has to live on a stable domain the buyer's tooling
+trusts.
 
 The payer signs an EIP-3009 `TransferWithAuthorization` — a typed message, not a
 transaction — so **a paying agent needs USD₮0 and no gas token at all.** The facilitator
@@ -143,6 +148,22 @@ page. A single short-lived page from a rate-limited, on-chain-identified wallet 
 phishing vehicle, but a determined actor within those limits could still serve something
 malicious for a few minutes. A commercial deployment adds content scanning and a takedown
 path on top of these structural controls; they are complementary, not a substitute.
+
+## No one is in the loop
+
+The service is autonomous by construction. An agent calls `https://tinydock.xyz/api/mcp`,
+receives a 402, signs, pays, and is served — no account, no dashboard, no operator, no
+human on either end. The HTTP endpoint *is* the whole system; it runs 24/7 on serverless
+compute and answers every paid request the same way whether or not anyone is watching.
+`scripts/pay-402.ts` is a complete client in ~120 lines: hit the endpoint, decode the
+challenge, sign, replay. Any agent with a funded wallet can do it.
+
+**Roadmap — the task-marketplace responder.** OKX's marketplace also offers a *negotiated*
+task flow (create task → quote → deliver) layered on top of direct calls. Serving that flow
+unattended needs a small always-on worker that runs a deterministic state machine — accept,
+set payment mode to x402, execute via this endpoint, deliver — since TinyDock's terms are
+fixed and there is nothing to actually negotiate. That worker is the next build; the direct
+x402 path above needs none of it and already requires no one.
 
 ## Known limitations
 

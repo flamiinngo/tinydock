@@ -21,7 +21,7 @@ import { MCP_ROUTE, NETWORK } from '../src/config.js';
 
 const args = process.argv.slice(2);
 const PAY = args.includes('--yes');
-const BASE = args.find((a) => a.startsWith('--url='))?.slice('--url='.length) ?? 'https://tinydock.vercel.app';
+const BASE = args.find((a) => a.startsWith('--url='))?.slice('--url='.length) ?? 'https://tinydock.xyz';
 
 /**
  * Refuse to sign an authorization larger than this, in USDT0 base units.

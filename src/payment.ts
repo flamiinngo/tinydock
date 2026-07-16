@@ -70,7 +70,7 @@ export async function previewChallenge(): Promise<HTTPResponseInstructions> {
     getHeader: () => undefined,
     getMethod: () => 'POST',
     getPath: () => MCP_ROUTE,
-    getUrl: () => `https://tinydock.vercel.app${MCP_ROUTE}`,
+    getUrl: () => `https://tinydock.xyz${MCP_ROUTE}`,
     getAcceptHeader: () => 'application/json',
     getUserAgent: () => 'tinydock-selftest',
   };
