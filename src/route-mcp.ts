@@ -50,6 +50,27 @@ function serveRequest(body: unknown): { leaseSeconds: number } | undefined {
 const clampLease = (seconds: number): number =>
   Math.round(Math.min(Math.max(seconds, 10), MAX_LEASE_SECONDS));
 
+const ACCEPT_VALUE = 'application/json, text/event-stream';
+
+/**
+ * Force the Accept header to satisfy the MCP transport, for callers that send a
+ * minimal or missing Accept (OKX's x402 payer client). @hono/node-server rebuilds the
+ * request from `rawHeaders`, so patch that array; also set the parsed `headers` for any
+ * other reader.
+ */
+function forceAcceptHeader(req: IncomingMessage): void {
+  const raw = req.rawHeaders;
+  let found = false;
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    if (raw[i]?.toLowerCase() === 'accept') {
+      raw[i + 1] = ACCEPT_VALUE;
+      found = true;
+    }
+  }
+  if (!found) raw.push('Accept', ACCEPT_VALUE);
+  req.headers.accept = ACCEPT_VALUE;
+}
+
 function sendDenied(res: ServerResponse, denied: Denied): void {
   if (denied.retryAfterSeconds) res.setHeader('Retry-After', String(denied.retryAfterSeconds));
   res.writeHead(denied.status, { 'Content-Type': 'application/json' });
@@ -128,6 +149,16 @@ export default async function handler(
         void transport.close();
         void server.close();
       });
+
+      // The MCP StreamableHTTP transport 406s unless the caller's Accept header lists
+      // *both* application/json and text/event-stream. x402 payer clients (OKX's
+      // task-402-pay, and minimal agents generally) send neither, so the paid replay
+      // failed before the tool ran. Force the header — `enableJsonResponse: true` means
+      // the reply is a normal JSON body, not SSE, whatever the client actually sent.
+      //
+      // @hono/node-server (which the transport wraps) rebuilds the Web Request from
+      // `req.rawHeaders`, NOT `req.headers`, so both must be patched.
+      forceAcceptHeader(req);
 
       await server.connect(transport);
       await transport.handleRequest(req, res, body);

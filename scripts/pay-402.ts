@@ -73,11 +73,14 @@ const params = wantsServe
 
 const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params });
 
-/** The MCP transport validates Accept before it will answer. It runs *after*
- *  settlement, so getting this wrong means paying for a 406. */
+/**
+ * `--minimal-accept` sends only `application/json` — mimicking OKX's task-402-pay
+ * client, which does NOT send text/event-stream. The server must handle it (the fix).
+ * Default keeps the dual header that a compliant MCP client sends.
+ */
 const headers = {
   'Content-Type': 'application/json',
-  Accept: 'application/json, text/event-stream',
+  Accept: args.includes('--minimal-accept') ? 'application/json' : 'application/json, text/event-stream',
 };
 
 const account = privateKeyToAccount(KEY as `0x${string}`);
